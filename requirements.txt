@@ -1,0 +1,36 @@
+# Core ML
+torch>=2.0.0
+transformers>=4.40.0
+datasets>=2.18.0
+accelerate>=0.28.0
+peft>=0.10.0
+trl>=0.8.0
+
+# QLoRA / quantization
+bitsandbytes>=0.43.0
+
+# LLaMA Factory (install separately)
+# See: https://github.com/hiyouga/LLaMA-Factory
+
+# Inference
+vllm>=0.4.0
+
+# Data processing
+pandas>=2.0.0
+numpy>=1.24.0
+jsonlines>=4.0.0
+
+# Evaluation
+rouge-score>=0.1.2
+sacrebleu>=2.3.1
+evaluate>=0.4.0
+
+# Notebooks
+jupyter>=1.0.0
+ipywidgets>=8.0.0
+
+# Utilities
+tqdm>=4.66.0
+pyyaml>=6.0.0
+python-dotenv>=1.0.0
+huggingface-hub>=0.22.0

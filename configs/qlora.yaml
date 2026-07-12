@@ -1,0 +1,20 @@
+### QLoRA configuration (shared settings)
+### These settings are imported/referenced by training configs
+
+quantization_bit: 4
+quantization_method: bitsandbytes  # or gptq
+
+### LoRA hyperparameters
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target: all         # target all linear layers
+
+### Memory optimization
+use_flash_attn: true
+use_gradient_checkpointing: true
+upcast_layernorm: true
+
+### Mixed precision
+bf16: true
+fp16: false

@@ -1,0 +1,22 @@
+### Inference configuration for KaleemCoder
+
+model_name_or_path: ../adapters/kaleemcoder-sft   # or merged model path
+template: qwen
+trust_remote_code: true
+infer_backend: huggingface   # or vllm
+
+### Generation settings
+max_new_tokens: 1024
+temperature: 0.7
+top_p: 0.9
+top_k: 50
+repetition_penalty: 1.1
+do_sample: true
+
+### vLLM settings (when infer_backend: vllm)
+vllm_maxlen: 4096
+vllm_gpu_util: 0.85
+
+### Quantization for inference
+quantization_bit: 4
+quantization_method: bitsandbytes
