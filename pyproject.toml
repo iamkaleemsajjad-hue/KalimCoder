@@ -1,0 +1,106 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name = "kaleemcoder"
+version = "0.1.0"
+description = "A coding-focused LLM fine-tuned from Qwen3-8B using QLoRA + DPO"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+authors = [
+  { name = "iamkaleemsajjad-hue", url = "https://github.com/iamkaleemsajjad-hue" },
+]
+keywords = ["llm", "coding", "qwen", "qlora", "fine-tuning", "ai"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+# Core runtime dependencies (lightweight — heavy ML packages installed separately)
+dependencies = [
+  "pyyaml>=6.0",
+  "tqdm>=4.66",
+  "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+train = [
+  "torch>=2.0",
+  "transformers>=4.40",
+  "datasets>=2.18",
+  "accelerate>=0.28",
+  "peft>=0.10",
+  "trl>=0.8",
+  "bitsandbytes>=0.43",
+]
+eval = [
+  "rouge-score>=0.1.2",
+  "sacrebleu>=2.3.1",
+  "evaluate>=0.4.0",
+]
+dev = [
+  "pytest>=8.0",
+  "pytest-cov>=5.0",
+  "ruff>=0.4",
+  "black>=24.0",
+  "isort>=5.13",
+  "pre-commit>=3.7",
+]
+all = ["kaleemcoder[train,eval,dev]"]
+
+[project.urls]
+Homepage      = "https://github.com/iamkaleemsajjad-hue/KalimCoder"
+Repository    = "https://github.com/iamkaleemsajjad-hue/KalimCoder"
+Issues        = "https://github.com/iamkaleemsajjad-hue/KalimCoder/issues"
+
+# ── Tool configs ──────────────────────────────────────────────────────────────
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["src", "scripts", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E",   # pycodestyle errors
+  "W",   # pycodestyle warnings
+  "F",   # pyflakes
+  "I",   # isort
+  "B",   # flake8-bugbear
+  "UP",  # pyupgrade
+]
+ignore = ["E501"]  # line length handled by black
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311"]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+src_paths = ["src", "scripts", "tests"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "scripts/*"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false

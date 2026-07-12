@@ -1,7 +1,5 @@
-﻿from setuptools import setup, find_packages
-setup(
-    name='kaleemcoder',
-    version='0.1.0',
-    packages=find_packages(where='src'),
-    package_dir={'': 'src'},
-)
+# pyproject.toml is the source of truth.
+# This file exists only for legacy editable-install compatibility.
+# Use: pip install -e ".[train,eval,dev]"
+from setuptools import setup
+setup()

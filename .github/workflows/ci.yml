@@ -7,9 +7,44 @@ on:
     branches: [ main ]
 
 jobs:
-  lint-and-test:
+  # ── Job 1: Lint & Format Check ────────────────────────────────────────────
+  lint:
+    name: Lint & Format
     runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: lint-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install lint tools
+        run: pip install ruff black isort
+
+      - name: ruff — lint
+        run: ruff check src/ scripts/ tests/
+
+      - name: black — format check
+        run: black --check src/ scripts/ tests/
+
+      - name: isort — import order check
+        run: isort --check-only src/ scripts/ tests/
+
+  # ── Job 2: Tests ──────────────────────────────────────────────────────────
+  test:
+    name: Unit Tests (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    needs: lint
     strategy:
+      fail-fast: false
       matrix:
         python-version: ["3.10", "3.11"]
 
@@ -21,15 +56,35 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: test-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install pytest ruff
-          # Install lightweight deps only (skip heavy torch/transformers for CI)
-          pip install datasets pyyaml
+          # Lightweight CI deps only — skip torch/transformers
+          pip install pytest pytest-cov pyyaml datasets
 
-      - name: Lint with ruff
-        run: ruff check src/ scripts/ tests/
+      - name: Install package (editable)
+        run: pip install -e . --no-deps
 
-      - name: Run unit tests
-        run: pytest tests/ -v --tb=short
+      - name: Run tests with coverage
+        run: pytest tests/ -v --tb=short --cov=src --cov-report=term-missing
+
+  # ── Job 3: Pre-commit hooks ───────────────────────────────────────────────
+  pre-commit:
+    name: Pre-commit Hooks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: pre-commit/action@v3.0.1
