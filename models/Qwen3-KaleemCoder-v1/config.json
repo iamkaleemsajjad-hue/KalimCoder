@@ -1,0 +1,22 @@
+{
+  "_model_card": "models/Qwen3-KaleemCoder-v1/README.md",
+  "model_type": "qwen3",
+  "architectures": ["Qwen2ForCausalLM"],
+  "base_model": "Qwen/Qwen3-8B",
+  "fine_tuning_method": "qlora",
+  "lora_rank": 64,
+  "lora_alpha": 128,
+  "quantization_bits": 4,
+  "version": "1.0.0",
+  "status": "in_training",
+  "experiment_ref": "experiments/001_qwen_base",
+  "hf_repo": "iamkaleemsajjad-hue/KaleemCoder-Qwen3-8B-v1",
+  "released": false,
+  "release_date": null,
+  "benchmarks": {
+    "HumanEval_pass1": null,
+    "MBPP_pass1": null,
+    "LiveCodeBench": null,
+    "SWE_bench_lite": null
+  }
+}

@@ -1,15 +1,35 @@
-# Large model artifacts
+# ── Large model artifacts (never commit these) ────────────────────────────────
 checkpoints/
 adapters/
 *.bin
 *.safetensors
 *.pt
 *.ckpt
+*.pth
+*.gguf
+*.ggml
 
-# Environment
-.env
+# Model card releases — keep README.md + config.json, ignore weights
+models/*/pytorch_model*.bin
+models/*/model*.safetensors
+models/*/*.pt
+models/*/optimizer.pt
 
-# Python
+# ── GPU / compute caches ──────────────────────────────────────────────────────
+# HuggingFace cache
+.cache/huggingface/
+~/.cache/huggingface/
+
+# Triton / CUDA kernel cache
+.triton/
+__triton_cache__/
+
+# DeepSpeed checkpoint shards
+global_step*/
+zero_to_fp32.py
+latest
+
+# ── Python ────────────────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
 *$py.class
@@ -34,11 +54,12 @@ share/python-wheels/
 *.egg
 MANIFEST
 
-# Jupyter Notebook
+# ── Jupyter Notebooks ─────────────────────────────────────────────────────────
 .ipynb_checkpoints/
 *.ipynb_checkpoints
+# (nbstripout via pre-commit handles output stripping)
 
-# Environments
+# ── Virtual environments ──────────────────────────────────────────────────────
 .env
 .venv
 env/
@@ -47,27 +68,47 @@ ENV/
 env.bak/
 venv.bak/
 
-# IDEs
+# ── Secrets & credentials ─────────────────────────────────────────────────────
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+secrets/
+
+# ── IDEs ──────────────────────────────────────────────────────────────────────
 .vscode/
 .idea/
 *.sublime-project
 *.sublime-workspace
+.cursor/
 
-# OS
+# ── OS ────────────────────────────────────────────────────────────────────────
 .DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
 Thumbs.db
+desktop.ini
 
-# Logs
-*.log
-logs/
+# ── Logs — keep folder structure (.gitkeep), ignore content ──────────────────
+logs/**/*.log
+logs/**/*.jsonl
+logs/**/*.json
+logs/**/*.txt
+!logs/**/.gitkeep
 
-# Data (large files — keep structure via .gitkeep)
+# ── Datasets — keep structure (.gitkeep), ignore large data files ─────────────
 datasets/raw/*.json
 datasets/raw/*.jsonl
 datasets/raw/*.parquet
+datasets/raw/*.csv
 datasets/cleaned/*.json
 datasets/cleaned/*.jsonl
 datasets/cleaned/*.parquet
+datasets/cleaned/*.csv
 datasets/instruction/*.json
 datasets/instruction/*.jsonl
 datasets/instruction/*.parquet
@@ -77,14 +118,23 @@ datasets/preference/*.parquet
 datasets/synthetic/*.json
 datasets/synthetic/*.jsonl
 datasets/synthetic/*.parquet
+datasets/evaluation/*.json
+datasets/evaluation/*.jsonl
 
-# Logs (keep .gitkeep, ignore actual log files)
-logs/**/*.log
-logs/**/*.jsonl
-logs/**/*.json
-!logs/**/.gitkeep
-
-# Experiment plots (large image files)
+# ── Experiment artifacts — keep config/notes/metrics, ignore large outputs ────
 experiments/**/plots/*.png
 experiments/**/plots/*.jpg
 experiments/**/plots/*.pdf
+experiments/**/plots/*.svg
+
+# ── Temporary files ───────────────────────────────────────────────────────────
+tmp/
+temp/
+*.tmp
+*.temp
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
