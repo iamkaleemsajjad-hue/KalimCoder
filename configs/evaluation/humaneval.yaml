@@ -1,0 +1,12 @@
+# evaluation/humaneval.yaml — HumanEval benchmark config
+
+benchmark: HumanEval
+problems_path: benchmarks/HumanEval/
+n_samples: 1       # samples per problem for pass@1
+temperature: 0.1
+max_new_tokens: 512
+timeout_seconds: 10
+
+# Output
+results_dir: logs/evaluation/
+save_per_problem: true

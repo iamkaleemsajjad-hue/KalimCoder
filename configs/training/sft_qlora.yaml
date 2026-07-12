@@ -1,0 +1,28 @@
+# training/sft_qlora.yaml — SFT + QLoRA training config
+
+stage: sft
+finetuning_type: lora
+
+# LoRA
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target: all
+
+# QLoRA
+quantization_bit: 4
+quantization_method: bitsandbytes
+
+# Training
+per_device_train_batch_size: 2
+gradient_accumulation_steps: 8
+learning_rate: 2.0e-4
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.05
+bf16: true
+
+# Saving
+save_steps: 500
+save_total_limit: 3
+logging_steps: 10

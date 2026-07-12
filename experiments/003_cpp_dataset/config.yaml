@@ -1,0 +1,19 @@
+﻿experiment_id: 003_cpp_dataset
+title: "C++ Dataset SFT"
+status: planned   # planned | running | completed
+
+model:
+  base: checkpoints/qwen3-8b-base
+  adapter_out: adapters/003_cpp_dataset
+
+dataset:
+  source: datasets/instruction/
+  max_samples: null
+
+training:
+  config: configs/training/sft_qlora.yaml
+
+evaluation:
+  benchmarks:
+    - HumanEval
+    - MBPP

@@ -1,0 +1,10 @@
+# model/qwen3_8b.yaml — Base model configuration
+
+model_name_or_path: Qwen/Qwen3-8B
+trust_remote_code: true
+torch_dtype: bfloat16
+attn_implementation: flash_attention_2   # requires flash-attn package
+
+# Tokenizer
+padding_side: right
+max_length: 4096

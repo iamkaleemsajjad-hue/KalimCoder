@@ -1,0 +1,19 @@
+﻿experiment_id: 006_repo_agent
+title: "Repository-Level Agent"
+status: planned   # planned | running | completed
+
+model:
+  base: checkpoints/qwen3-8b-base
+  adapter_out: adapters/006_repo_agent
+
+dataset:
+  source: datasets/instruction/
+  max_samples: null
+
+training:
+  config: configs/training/sft_qlora.yaml
+
+evaluation:
+  benchmarks:
+    - HumanEval
+    - MBPP

@@ -1,0 +1,30 @@
+# training/dpo.yaml — DPO training config
+
+stage: dpo
+finetuning_type: lora
+pref_beta: 0.1
+pref_loss: sigmoid
+
+# LoRA
+lora_rank: 64
+lora_alpha: 128
+lora_dropout: 0.05
+lora_target: all
+
+# QLoRA
+quantization_bit: 4
+quantization_method: bitsandbytes
+
+# Training
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 16
+learning_rate: 5.0e-5
+num_train_epochs: 1.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+
+# Saving
+save_steps: 200
+save_total_limit: 2
+logging_steps: 10

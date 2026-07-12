@@ -61,10 +61,30 @@ Thumbs.db
 *.log
 logs/
 
-# Data (raw large files)
+# Data (large files — keep structure via .gitkeep)
 datasets/raw/*.json
 datasets/raw/*.jsonl
 datasets/raw/*.parquet
-datasets/processed/*.json
-datasets/processed/*.jsonl
-datasets/processed/*.parquet
+datasets/cleaned/*.json
+datasets/cleaned/*.jsonl
+datasets/cleaned/*.parquet
+datasets/instruction/*.json
+datasets/instruction/*.jsonl
+datasets/instruction/*.parquet
+datasets/preference/*.json
+datasets/preference/*.jsonl
+datasets/preference/*.parquet
+datasets/synthetic/*.json
+datasets/synthetic/*.jsonl
+datasets/synthetic/*.parquet
+
+# Logs (keep .gitkeep, ignore actual log files)
+logs/**/*.log
+logs/**/*.jsonl
+logs/**/*.json
+!logs/**/.gitkeep
+
+# Experiment plots (large image files)
+experiments/**/plots/*.png
+experiments/**/plots/*.jpg
+experiments/**/plots/*.pdf
