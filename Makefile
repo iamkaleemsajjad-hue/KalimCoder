@@ -36,6 +36,15 @@ prepare-data: ## Download and format CodeAlpaca dataset
 		--dataset codealpaca \
 		--output_dir datasets/instruction
 
+.PHONY: download-data
+download-data: ## Download all enabled datasets from configs/datasets.yaml
+	$(PYTHON) scripts/download_datasets.py
+
+.PHONY: download-data-force
+download-data-force: ## Re-download all datasets even if they already exist
+	$(PYTHON) scripts/download_datasets.py --force
+
+
 # ── Training ─────────────────────────────────────────────────────────────────
 
 .PHONY: train-sft
