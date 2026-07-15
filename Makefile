@@ -52,6 +52,16 @@ validate-data: ## Validate all raw datasets and write reports to datasets/evalua
 validate-data-sample: ## Validate using a 10 000-row sample (fast preview)
 	$(PYTHON) scripts/validate_dataset.py --sample 10000
 
+.PHONY: clean-data
+clean-data: ## Apply cleaning pipeline to all raw datasets
+	$(PYTHON) scripts/clean_dataset.py
+
+.PHONY: clean-data-force
+clean-data-force: ## Force re-clean all datasets even if cleaned output exists
+	$(PYTHON) scripts/clean_dataset.py --force
+
+
+
 
 
 
