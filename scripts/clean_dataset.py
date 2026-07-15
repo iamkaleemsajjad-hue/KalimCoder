@@ -138,29 +138,14 @@ class CleanResult:
 
 
 def _configure_logging(verbose: bool) -> logging.Logger:
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    log_file = _LOG_DIR / f"cleaning_{timestamp}.log"
-
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-
-    fmt = logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    """Delegates to the shared pipeline logging utility."""
+    from src.utils.logging import configure_pipeline_logging  # noqa: PLC0415
+    return configure_pipeline_logging(
+        log_dir=_LOG_DIR,
+        log_prefix="cleaning",
+        logger_name="clean_dataset",
+        verbose=verbose,
     )
-
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
-
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG if verbose else logging.INFO)
-    ch.setFormatter(fmt)
-    root.addHandler(ch)
-
-    return logging.getLogger("clean_dataset")
 
 
 # ---------------------------------------------------------------------------

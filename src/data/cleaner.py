@@ -22,6 +22,7 @@ operation returns a *new* ``datasets.Dataset`` object.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -222,10 +223,14 @@ def _row_fingerprint(row: dict, columns: Sequence[str]) -> str:
     return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
 
-def _full_row_fingerprint(row: dict) -> int:
-    """Python hash of the full JSON-serialisable row (all columns)."""
-    import json
-    return hash(json.dumps(row, sort_keys=True, default=str))
+def _full_row_fingerprint(row: dict) -> str:
+    """SHA-256 of the full JSON-serialisable row (all columns).
+
+    Uses SHA-256 (not ``hash()``) to guarantee identical results across
+    processes, Python versions, and PYTHONHASHSEED settings.
+    """
+    serialised = json.dumps(row, sort_keys=True, default=str).encode()
+    return hashlib.sha256(serialised).hexdigest()
 
 
 # ---------------------------------------------------------------------------
@@ -330,21 +335,27 @@ def rule_remove_long_samples(
 def rule_remove_duplicate_rows(
     dataset: "Dataset",  # type: ignore[name-defined]  # noqa: F821
 ) -> "Dataset":
-    """Drop rows that are identical across all columns (full-row dedup)."""
-    seen: set[int] = set()
-    keep_mask: list[bool] = []
+    """Drop rows that are identical across all columns (full-row dedup).
 
-    for i in range(len(dataset)):
-        fp = _full_row_fingerprint(dataset[i])
-        if fp in seen:
-            keep_mask.append(False)
-        else:
+    Uses a single batched ``to_dict()`` call rather than per-row
+    ``dataset[i]`` fetches to avoid O(N) Arrow deserialisation overhead.
+    """
+    cols = dataset.column_names
+    # Materialise all columns at once — one vectorised copy
+    col_data = {c: dataset[c] for c in cols}
+    n = len(dataset)
+
+    seen: set[str] = set()
+    keep_indices: list[int] = []
+
+    for i in range(n):
+        row = {c: col_data[c][i] for c in cols}
+        fp = _full_row_fingerprint(row)
+        if fp not in seen:
             seen.add(fp)
-            keep_mask.append(True)
+            keep_indices.append(i)
 
-    return dataset.select(
-        [i for i, keep in enumerate(keep_mask) if keep]
-    )
+    return dataset.select(keep_indices)
 
 
 def rule_remove_duplicate_code(
@@ -353,25 +364,28 @@ def rule_remove_duplicate_code(
 ) -> "Dataset":
     """Drop rows whose code/text fingerprint (across all text columns) has
     already been seen, keeping the first occurrence.
+
+    Uses batched column access rather than per-row ``dataset[i]`` fetches.
     """
     if not text_cols:
         logger.debug("rule_remove_duplicate_code: no text columns found, skipping.")
         return dataset
 
+    # Materialise only the text columns needed
+    col_data = {c: dataset[c] for c in text_cols}
+    n = len(dataset)
+
     seen: set[str] = set()
-    keep_mask: list[bool] = []
+    keep_indices: list[int] = []
 
-    for i in range(len(dataset)):
-        fp = _row_fingerprint(dataset[i], text_cols)
-        if fp in seen:
-            keep_mask.append(False)
-        else:
+    for i in range(n):
+        row = {c: col_data[c][i] for c in text_cols}
+        fp = _row_fingerprint(row, text_cols)
+        if fp not in seen:
             seen.add(fp)
-            keep_mask.append(True)
+            keep_indices.append(i)
 
-    return dataset.select(
-        [i for i, keep in enumerate(keep_mask) if keep]
-    )
+    return dataset.select(keep_indices)
 
 
 # ---------------------------------------------------------------------------

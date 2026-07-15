@@ -31,9 +31,11 @@ Usage
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import math
+import random
 import re
 import sys
 import time
@@ -229,7 +231,6 @@ def _analyse_text_column(
     # Optionally sub-sample for speed on very large columns
     analysis_texts = texts
     if sample_size and len(texts) > sample_size:
-        import random
         analysis_texts = random.sample(texts, sample_size)
         logger.debug(
             "  Column %r: sub-sampled %d of %d rows for text analysis.",
@@ -268,12 +269,13 @@ def _count_duplicates(
             limit, n,
         )
 
-    seen: set[int] = set()
+    seen: set[str] = set()
     dupes = 0
 
     for i in tqdm(range(limit), desc="  Dup-scan", unit="row", leave=False):
         row = dataset[i]
-        row_hash = hash(json.dumps(row, sort_keys=True, default=str))
+        serialised = json.dumps(row, sort_keys=True, default=str).encode()
+        row_hash = hashlib.sha256(serialised).hexdigest()
         if row_hash in seen:
             dupes += 1
         else:
@@ -344,7 +346,6 @@ def _validate_one(
     sampled = False
     effective_sample: Optional[int] = None
     if sample_size and total_rows > sample_size:
-        import random
         indices = random.sample(range(total_rows), sample_size)
         dataset = dataset.select(indices)
         sampled = True
@@ -624,29 +625,14 @@ Examples:
 
 
 def _configure_logging(verbose: bool) -> logging.Logger:
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    log_file = _LOG_DIR / f"validation_{timestamp}.log"
-
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-
-    fmt = logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    """Delegates to the shared pipeline logging utility."""
+    from src.utils.logging import configure_pipeline_logging  # noqa: PLC0415
+    return configure_pipeline_logging(
+        log_dir=_LOG_DIR,
+        log_prefix="validation",
+        logger_name="validate_dataset",
+        verbose=verbose,
     )
-
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
-
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG if verbose else logging.INFO)
-    ch.setFormatter(fmt)
-    root.addHandler(ch)
-
-    return logging.getLogger("validate_dataset")
 
 
 # ---------------------------------------------------------------------------

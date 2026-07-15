@@ -54,11 +54,9 @@ _PROJECT_ROOT = _SCRIPT_DIR.parent
 # ---------------------------------------------------------------------------
 _cwd_entries = ["", ".", str(Path(".").resolve())]
 _shadow_entries = _cwd_entries + [str(_PROJECT_ROOT)]
-_removed: list[str] = []
 for _e in _shadow_entries:
     while _e in sys.path:
         sys.path.remove(_e)
-        _removed.append(_e)
 
 try:
     import datasets as hf_datasets
@@ -91,32 +89,14 @@ _SENTINEL_FILE_ALT = "dataset_info.json"      # written by single-split save
 
 
 def _configure_logging(log_dir: Path, verbose: bool) -> logging.Logger:
-    """Set up root logger with a file handler and a console handler."""
-    log_dir.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
-    log_file = log_dir / f"download_{timestamp}.log"
-
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-
-    fmt = logging.Formatter(
-        "%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    """Delegates to the shared pipeline logging utility."""
+    from src.utils.logging import configure_pipeline_logging  # noqa: PLC0415
+    return configure_pipeline_logging(
+        log_dir=log_dir,
+        log_prefix="download",
+        logger_name="download_manager",
+        verbose=verbose,
     )
-
-    # File handler — always DEBUG
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
-
-    # Console handler — INFO (or DEBUG if --verbose)
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG if verbose else logging.INFO)
-    ch.setFormatter(fmt)
-    root.addHandler(ch)
-
-    return logging.getLogger("download_manager")
 
 
 # ---------------------------------------------------------------------------
@@ -164,9 +144,10 @@ class DownloadResult:
 def _destination_for(entry: DatasetEntry) -> Path:
     """Return the raw download destination path for *entry*.
 
-    Layout: ``datasets/raw/<dataset_name>/``
+    Delegates to :attr:`~src.data.registry.DatasetEntry.destination_path`
+    so the YAML ``destination`` field is the single source of truth.
     """
-    return _RAW_BASE / entry.name
+    return entry.destination_path
 
 
 def _already_exists(dest: Path) -> bool:

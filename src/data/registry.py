@@ -73,6 +73,7 @@ class DatasetEntry:
     destination: str
     enabled: bool
     config: str | None = field(default=None)
+    adapter: str | None = field(default=None)
 
     # ------------------------------------------------------------------
     # Derived helpers
@@ -86,7 +87,8 @@ class DatasetEntry:
     def __str__(self) -> str:  # pragma: no cover
         cfg = f"/{self.config}" if self.config else ""
         status = "on" if self.enabled else "off"
-        return f"[{status}] {self.name} ({self.repo_id}{cfg}, split={self.split})"
+        adapter = f" adapter={self.adapter!r}" if self.adapter else ""
+        return f"[{status}] {self.name} ({self.repo_id}{cfg}, split={self.split}{adapter})"
 
 
 # ---------------------------------------------------------------------------
@@ -100,7 +102,8 @@ _REQUIRED_FIELDS: dict[str, type] = {
     "enabled": bool,
 }
 _OPTIONAL_FIELDS: dict[str, type | tuple[type, ...]] = {
-    "config": (str, type(None)),
+    "config":  (str, type(None)),
+    "adapter": (str, type(None)),
 }
 
 
@@ -233,6 +236,7 @@ def _load_yaml(config_path: Path) -> list[DatasetEntry]:
             config=validated.get("config"),       # optional
             split=validated["split"],
             destination=validated["destination"],
+            adapter=validated.get("adapter"),     # optional
             enabled=validated["enabled"],
         )
         entries.append(entry)

@@ -96,28 +96,14 @@ _CANONICAL_COLUMNS = [_INSTRUCTION_COL, _INPUT_COL, _OUTPUT_COL, _SOURCE_COL]
 
 
 def _configure_logging(verbose: bool) -> logging.Logger:
-    _LOG_DIR.mkdir(parents=True, exist_ok=True)
-    ts = time.strftime("%Y%m%d_%H%M%S")
-    log_file = _LOG_DIR / f"build_{ts}.log"
-
-    root = logging.getLogger()
-    root.setLevel(logging.DEBUG)
-    fmt = logging.Formatter(
-        "%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    """Delegates to the shared pipeline logging utility."""
+    from src.utils.logging import configure_pipeline_logging  # noqa: PLC0415
+    return configure_pipeline_logging(
+        log_dir=_LOG_DIR,
+        log_prefix="build",
+        logger_name="build_dataset",
+        verbose=verbose,
     )
-
-    fh = logging.FileHandler(log_file, encoding="utf-8")
-    fh.setLevel(logging.DEBUG)
-    fh.setFormatter(fmt)
-    root.addHandler(fh)
-
-    ch = logging.StreamHandler(sys.stdout)
-    ch.setLevel(logging.DEBUG if verbose else logging.INFO)
-    ch.setFormatter(fmt)
-    root.addHandler(ch)
-
-    return logging.getLogger("build_dataset")
 
 
 # ---------------------------------------------------------------------------
@@ -239,9 +225,18 @@ _ADAPTER_REGISTRY: dict[str, Adapter] = {
 }
 
 
-def get_adapter(dataset_name: str) -> Adapter:
-    """Return the registered adapter for *dataset_name*, or the generic one."""
-    return _ADAPTER_REGISTRY.get(dataset_name, _adapt_generic)
+def get_adapter(dataset_name: str, adapter_hint: str | None = None) -> Adapter:
+    """Return the adapter for *dataset_name*.
+
+    Lookup order:
+    1. *adapter_hint* — the ``adapter`` field from ``configs/datasets.yaml``
+       (the registry is the single source of truth when populated).
+    2. *dataset_name* in ``_ADAPTER_REGISTRY`` — legacy fallback for names
+       not yet in the YAML.
+    3. ``_adapt_generic`` — heuristic fallback for unknown schemas.
+    """
+    key = adapter_hint or dataset_name
+    return _ADAPTER_REGISTRY.get(key, _adapt_generic)
 
 
 # ---------------------------------------------------------------------------
@@ -409,10 +404,11 @@ def _convert_dataset(
     dataset: hf_datasets.Dataset,
     dataset_name: str,
     logger: logging.Logger,
+    adapter_hint: str | None = None,
 ) -> tuple[hf_datasets.Dataset, SourceStats]:
     """Apply the per-dataset adapter, return canonical Dataset + SourceStats."""
-    adapter = get_adapter(dataset_name)
-    adapter_name = "generic" if dataset_name not in _ADAPTER_REGISTRY else dataset_name
+    adapter = get_adapter(dataset_name, adapter_hint)
+    adapter_name = adapter_hint or (dataset_name if dataset_name in _ADAPTER_REGISTRY else "generic")
     logger.info(
         "  Adapter: %r (%d rows)",
         adapter_name,
@@ -424,7 +420,12 @@ def _convert_dataset(
     canonical_rows: list[dict[str, str]] = []
     for row in tqdm(dataset, desc=f"  Converting [{dataset_name}]", leave=False, unit="row"):
         result = adapter(row)
-        if result is None:
+        # Validate: adapter must return non-None with non-empty instruction AND output
+        if (
+            result is None
+            or not result.get(_INSTRUCTION_COL)
+            or not result.get(_OUTPUT_COL)
+        ):
             stats.dropped += 1
         else:
             result[_SOURCE_COL] = dataset_name
@@ -534,6 +535,18 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 1
 
+    # ── 0. Load adapter hints from registry (non-fatal if registry unavailable) ─
+    _adapter_hints: dict[str, str | None] = {}
+    try:
+        from src.data.registry import load_registry  # noqa: PLC0415
+        registry_entries = load_registry()
+        _adapter_hints = {e.name: e.adapter for e in registry_entries}
+        logger.debug("Loaded adapter hints for %d registry entries.", len(_adapter_hints))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Could not load adapter hints from registry: %s — using heuristic adapters.", exc
+        )
+
     t0 = time.monotonic()
     logger.info(
         "Building training corpus from %d cleaned dataset(s): %s%s",
@@ -559,11 +572,13 @@ def main(argv: list[str] | None = None) -> int:
             source_stats.append(SourceStats(name=name, raw_rows=0, dropped=0))
             continue
 
-        converted, ss = _convert_dataset(ds, name, logger)
+        adapter_hint = _adapter_hints.get(name)
+        converted, ss = _convert_dataset(ds, name, logger, adapter_hint=adapter_hint)
         source_stats.append(ss)
 
         if len(converted) > 0:
             all_parts.append(converted)
+
 
     if not all_parts:
         logger.error("No rows were converted from any dataset. Aborting.")
@@ -580,7 +595,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # ── 4. Train/validation split ─────────────────────────────────────────────
     n_total = len(merged)
-    n_val = max(1, round(n_total * val_ratio)) if val_ratio > 0 else 0
+    n_val = round(n_total * val_ratio) if val_ratio > 0 else 0
     n_train = n_total - n_val
 
     logger.info(

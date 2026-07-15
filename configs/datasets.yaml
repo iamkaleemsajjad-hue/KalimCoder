@@ -7,7 +7,8 @@
 #   repo_id      (str)          – Hugging Face Hub repo (org/name) or canonical name.
 #   config       (str | null)   – Dataset config / subset name (pass to load_dataset).
 #   split        (str)          – Dataset split to consume  (e.g. "train", "test").
-#   destination  (str)          – Relative path under datasets/ where raw data is cached.
+#   destination  (str)          – Relative path (from project root) where raw data lands.
+#   adapter      (str | null)   – Name of the build-time schema adapter. null = generic.
 #   enabled      (bool)         – Toggle without deleting the entry. false = skipped.
 #
 # None of these entries trigger a download; the registry is metadata-only.
@@ -21,7 +22,8 @@ datasets:
     repo_id:     OpenCoder-LLM/opc-sft-stage1
     config:      null          # single-config dataset; no subset required
     split:       train
-    destination: datasets/opc_sft_stage1
+    destination: datasets/raw/opc_sft_stage1
+    adapter:     opc_sft_stage1
     enabled:     true
 
   # ── 2. The Stack v2 (bigcode) ───────────────────────────────────────────────
@@ -31,7 +33,8 @@ datasets:
     repo_id:     bigcode/the-stack-v2
     config:      null          # override per run (e.g. "python", "typescript")
     split:       train
-    destination: datasets/the_stack_v2
+    destination: datasets/raw/the_stack_v2
+    adapter:     the_stack_v2
     enabled:     true
 
   # ── 3. CodeSearchNet ────────────────────────────────────────────────────────
@@ -41,7 +44,8 @@ datasets:
     repo_id:     code_search_net
     config:      python        # start with Python; expand to others later
     split:       train
-    destination: datasets/code_search_net
+    destination: datasets/raw/code_search_net
+    adapter:     code_search_net
     enabled:     true
 
   # ── 4. SWE-bench Verified (Princeton-NLP) ───────────────────────────────────
@@ -51,5 +55,6 @@ datasets:
     repo_id:     Princeton-NLP/SWE-bench_Verified
     config:      null
     split:       test          # SWE-bench ships as test split
-    destination: datasets/swe_bench_verified
+    destination: datasets/raw/swe_bench_verified
+    adapter:     swe_bench_verified
     enabled:     true
