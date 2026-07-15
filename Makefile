@@ -60,8 +60,19 @@ clean-data: ## Apply cleaning pipeline to all raw datasets
 clean-data-force: ## Force re-clean all datasets even if cleaned output exists
 	$(PYTHON) scripts/clean_dataset.py --force
 
+.PHONY: build-dataset
+build-dataset: ## Merge cleaned datasets into final train/validation corpus
+	$(PYTHON) scripts/build_training_dataset.py
 
+.PHONY: build-dataset-dry-run
+build-dataset-dry-run: ## Dry-run build: merge + stats but do not write files
+	$(PYTHON) scripts/build_training_dataset.py --dry-run
 
+.PHONY: data-pipeline
+data-pipeline: ## Full pipeline: download -> clean -> build (end-to-end)
+	$(PYTHON) scripts/download_datasets.py
+	$(PYTHON) scripts/clean_dataset.py
+	$(PYTHON) scripts/build_training_dataset.py
 
 
 
