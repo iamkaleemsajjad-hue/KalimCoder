@@ -44,6 +44,16 @@ download-data: ## Download all enabled datasets from configs/datasets.yaml
 download-data-force: ## Re-download all datasets even if they already exist
 	$(PYTHON) scripts/download_datasets.py --force
 
+.PHONY: validate-data
+validate-data: ## Validate all raw datasets and write reports to datasets/evaluation/
+	$(PYTHON) scripts/validate_dataset.py
+
+.PHONY: validate-data-sample
+validate-data-sample: ## Validate using a 10 000-row sample (fast preview)
+	$(PYTHON) scripts/validate_dataset.py --sample 10000
+
+
+
 
 # ── Training ─────────────────────────────────────────────────────────────────
 

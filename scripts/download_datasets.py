@@ -43,12 +43,23 @@ from typing import Optional
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
-if str(_PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(_PROJECT_ROOT))
 
 # ---------------------------------------------------------------------------
 # Third-party imports (fail fast with a friendly message)
+#
+# IMPORTANT: import hf `datasets` BEFORE inserting the project root into
+# sys.path.  The repo contains a `datasets/` data directory that acts as a
+# namespace package and shadows the Hugging Face library when the project
+# root (or CWD) sits at the front of sys.path.
 # ---------------------------------------------------------------------------
+_cwd_entries = ["", ".", str(Path(".").resolve())]
+_shadow_entries = _cwd_entries + [str(_PROJECT_ROOT)]
+_removed: list[str] = []
+for _e in _shadow_entries:
+    while _e in sys.path:
+        sys.path.remove(_e)
+        _removed.append(_e)
+
 try:
     import datasets as hf_datasets
     from tqdm import tqdm
@@ -59,6 +70,10 @@ except ImportError as exc:
         "Or:            pip install -e '.[train]'"
     )
     sys.exit(1)
+finally:
+    # Restore project root so that src.* imports work.
+    if str(_PROJECT_ROOT) not in sys.path:
+        sys.path.insert(0, str(_PROJECT_ROOT))
 
 from src.data.registry import DatasetEntry, get_enabled_datasets
 
