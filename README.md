@@ -192,77 +192,139 @@ pip install -e ".[train,eval,dev]" # everything
 
 ---
 
-## 🗄️ Dataset Pipeline
+## 🗄️ Streaming Dataset Pipeline
+
+The pipeline is **fully streaming** — no intermediate files are written to disk.
+Peak disk usage stays below **2 GB** even for 500 GB+ raw corpora.
 
 ```
-Raw Data (HF Hub / Web)
+HuggingFace Hub
         │
-        ▼  scripts/prepare_dataset.py
-datasets/raw/
+        ▼  scripts/download_datasets.py
+datasets/raw/   (optional offline cache)
         │
-        ▼  src/data/cleaner.py  (deduplicate · length filter)
-datasets/cleaned/
+        ▼  scripts/run_pipeline.py
+           clean → quality score → dedup → shard
+datasets/processed/<name>/train-*.parquet
         │
-        ▼  src/data/formatter.py  (→ ChatML instruction pairs)
-datasets/instruction/       ← SFT training input
-datasets/preference/        ← DPO chosen/rejected pairs
-datasets/evaluation/        ← Held-out eval prompts
+        ▼  scripts/build_training_dataset.py
+           convert → mixture ratios → shuffle → register
+datasets/instruction/kalimcoder_sft.jsonl
+data/dataset_info.json                       ← auto-created
+        │
+        ▼  scripts/train.py
+           preflight checks → llamafactory-cli train
+adapters/kaleemcoder-sft/
+        │
+        ▼  scripts/merge_lora.py
+           LoRA merge → full model
+adapters/kaleemcoder-sft-merged/
 ```
 
-**Datasets used:**
+**Datasets:**
 
-| Dataset | Size | Purpose |
-|---|---|---|
-| [CodeAlpaca-20k](https://huggingface.co/datasets/sahil2801/CodeAlpaca-20k) | 20k | SFT baseline |
-| GitHub Code | varies | Pretraining-style |
-| Custom prompts | growing | Curated coding tasks |
-| DPO pairs | TBD | Alignment |
+| Dataset | Task | Ratio |
+|---------|------|-------|
+| [OpenCoder SFT Stage-1](https://huggingface.co/datasets/OpenCoder-LLM/opc-sft-stage1) | Instruction tuning | 20% |
+| [The Stack v2](https://huggingface.co/datasets/bigcode/the-stack-v2) | Code completion | 40% |
+| [CodeSearchNet](https://huggingface.co/datasets/code_search_net) | Code + docstrings | 15% |
+| [SWE-bench Verified](https://huggingface.co/datasets/princeton-nlp/SWE-bench_Verified) | Bug fixes | 15% |
+
+Ratios are configured in [`configs/mixture.yaml`](configs/mixture.yaml).
+
+---
+
+## 🏋️ End-to-End Training Workflow
+
+> After setup, a brand-new user runs these commands in order.
+> Everything else (dataset conversion, registration, preflight checks) happens automatically.
+
+### Step 1 — Download the base model
 
 ```bash
-make prepare-data    # download + format CodeAlpaca
+python scripts/download_model.py
+# Downloads Qwen/Qwen3-8B → checkpoints/qwen3-8b-base/
+```
+
+### Step 2 — Download datasets
+
+```bash
+python scripts/download_datasets.py
+# Streams from HuggingFace Hub → datasets/raw/  (optional offline cache)
+```
+
+### Step 3 — Run streaming pipeline
+
+```bash
+python scripts/run_pipeline.py
+# Cleans · scores · deduplicates → datasets/processed/<name>/train-*.parquet
+# Peak disk: < 2 GB  |  Resume: --resume  |  Dry-run: --dry-run
+```
+
+### Step 4 — Build training dataset
+
+```bash
+python scripts/build_training_dataset.py
+# Reads parquet shards → Alpaca JSONL → registers in data/dataset_info.json
+# Output: datasets/instruction/kalimcoder_sft.jsonl
+# Auto-creates: data/dataset_info.json
+```
+
+### Step 5 — Train (QLoRA SFT)
+
+```bash
+python scripts/train.py --config configs/qwen3_sft.yaml
+# Runs preflight checks (model · tokenizer · dataset · registration)
+# Launches: llamafactory-cli train configs/qwen3_sft.yaml
+# Output:   adapters/kaleemcoder-sft/
+# Resume:   automatic if checkpoint exists
+```
+
+### Step 6 — DPO alignment (optional)
+
+```bash
+python scripts/train.py --config configs/dpo.yaml
+```
+
+### Step 7 — Merge LoRA → full model
+
+```bash
+python scripts/merge_lora.py
+# Output: adapters/kaleemcoder-sft-merged/
+```
+
+### Step 8 — Evaluate
+
+```bash
+python scripts/evaluate.py \
+    --model_path adapters/kaleemcoder-sft-merged \
+    --eval_data  datasets/evaluation/eval_prompts.jsonl
 ```
 
 ---
 
-## 🏋️ Training Pipeline
-
-### 1. Download the base model
+### Makefile shortcuts
 
 ```bash
-make download-model
-# or: python scripts/download_model.py --model_id Qwen/Qwen3-8B
+make download-model     # Step 1
+make download-data      # Step 2
+make stream-pipeline    # Step 3
+make build-dataset      # Step 4
+make train-sft          # Step 5
+make merge-lora         # Step 7
+make eval               # Step 8
 ```
 
-### 2. Prepare datasets
+---
 
-```bash
-make prepare-data
-```
+### Adding a new dataset
 
-### 3. SFT training (QLoRA)
+1. Add an entry to [`configs/datasets.yaml`](configs/datasets.yaml)
+2. Add an adapter to [`src/data/adapters.py`](src/data/adapters.py) (if the schema is new)
+3. Add a ratio to [`configs/mixture.yaml`](configs/mixture.yaml)
+4. Re-run Steps 2–4
 
-```bash
-make train-sft
-# Config: configs/training/sft_qlora.yaml
-# Output: adapters/kaleemcoder-sft/
-```
-
-### 4. DPO alignment
-
-```bash
-make train-dpo
-# Config: configs/training/dpo.yaml
-# Output: adapters/kaleemcoder-dpo/
-```
-
-### 5. Merge LoRA → full model
-
-```bash
-make merge-lora
-# Output: adapters/kaleemcoder-sft-merged/
-```
-
-Each training run is tracked in `experiments/` with its own `config.yaml`, `metrics.json`, and `notes.md`.
+No other code changes required.
 
 ---
 

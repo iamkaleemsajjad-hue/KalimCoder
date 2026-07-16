@@ -1,39 +1,32 @@
 """
-scripts/build_training_dataset.py — Dataset merger for the KalimCoder pipeline.
+scripts/build_training_dataset.py — Build the final SFT corpus for LLaMA Factory.
 
-Reads every cleaned Arrow dataset under ``datasets/cleaned/``, normalises each
-sample into the canonical Alpaca instruction format::
+Reads every processed dataset under ``datasets/processed/<name>/train-*.parquet``
+(written by ``scripts/run_pipeline.py``), converts each row to Alpaca format,
+applies mixture ratios from ``configs/mixture.yaml``, shuffles and writes:
 
-    {
-        "instruction": "...",
-        "input":       "",
-        "output":      "..."
-    }
+    datasets/instruction/kalimcoder_sft.jsonl   ← JSONL for LLaMA Factory
+    data/dataset_info.json                       ← auto-registered
+    datasets/instruction/build_stats.json        ← statistics
+    datasets/instruction/build_report.md         ← Markdown report
 
-then shuffles, splits into train/validation, and saves to ``datasets/final/``.
-
-Design decisions
-----------------
-* **Per-source adapters** — each dataset has a named adapter function that maps
-  its idiosyncratic schema to the canonical format.  Unknown schemas fall back
-  to a heuristic adapter.
-* **Provenance tracking** — a ``_source`` column is added so downstream tooling
-  can weight or filter by origin.
-* **Configurable split** — ``--val-ratio`` controls how much goes to validation
-  (default 5 %).
-* **Reproducible** — ``--seed`` makes shuffling deterministic.
-* **Non-destructive** — cleaned datasets are never modified; final datasets are
-  written to a separate directory.
-* **Statistics** — per-source counts, global token-length histograms, and a
-  Markdown summary are saved alongside the final data.
+The script replaces the old ``datasets/cleaned/ → datasets/final/`` path and
+is the canonical connection point between the streaming pipeline and training.
 
 Usage
 -----
     python scripts/build_training_dataset.py
-    python scripts/build_training_dataset.py --val-ratio 0.05 --seed 42
     python scripts/build_training_dataset.py --name opc_sft_stage1
-    python scripts/build_training_dataset.py --cleaned-dir datasets/cleaned
+    python scripts/build_training_dataset.py --max-samples 100000
     python scripts/build_training_dataset.py --dry-run
+    python scripts/build_training_dataset.py --no-shuffle
+    python scripts/build_training_dataset.py --processed-dir datasets/processed
+    python scripts/build_training_dataset.py --out-dir datasets/instruction
+    python scripts/build_training_dataset.py --mixture configs/mixture.yaml
+    python scripts/build_training_dataset.py --dataset-name my_sft  # output name
+
+Output JSONL format (one JSON object per line, Alpaca):
+    {"instruction": "...", "input": "", "output": "...", "_source": "..."}
 """
 
 from __future__ import annotations
@@ -42,14 +35,16 @@ import argparse
 import json
 import logging
 import math
+import os
+import random
 import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Iterator, Optional
 
 # ---------------------------------------------------------------------------
-# Path bootstrap — strip shadow entries before importing HF library
+# Path bootstrap — strip shadow entries before any project imports
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SCRIPT_DIR.parent
@@ -60,12 +55,13 @@ for _e in _shadow:
         sys.path.remove(_e)
 
 try:
-    import datasets as hf_datasets
+    import pyarrow.parquet as pq
+    import yaml
     from tqdm import tqdm
 except ImportError as exc:
     print(
         f"[ERROR] Missing dependency: {exc}\n"
-        "Install with:  pip install datasets tqdm\n"
+        "Install with:  pip install pyarrow pyyaml tqdm\n"
         "Or:            pip install -e '.[train]'"
     )
     sys.exit(1)
@@ -74,32 +70,33 @@ finally:
         sys.path.insert(0, str(_PROJECT_ROOT))
 
 # ---------------------------------------------------------------------------
+# Project imports (after path bootstrap)
+# ---------------------------------------------------------------------------
+from src.data.dataset_info import register_dataset
+from src.data.registry import DatasetEntry, get_enabled_datasets, load_registry
+
+# ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
-_CLEANED_BASE: Path = _PROJECT_ROOT / "datasets" / "cleaned"
-_FINAL_BASE: Path = _PROJECT_ROOT / "datasets" / "final"
+_PROCESSED_BASE: Path = _PROJECT_ROOT / "datasets" / "processed"
+_INSTRUCTION_BASE: Path = _PROJECT_ROOT / "datasets" / "instruction"
+_MIXTURE_CFG: Path = _PROJECT_ROOT / "configs" / "mixture.yaml"
 _LOG_DIR: Path = _PROJECT_ROOT / "logs" / "build"
+_DEFAULT_DATASET_NAME = "kalimcoder_sft"
 
 _CHARS_PER_TOKEN: float = 4.0
+_TOKEN_BUCKETS = [0, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
-# Canonical output columns
-_INSTRUCTION_COL = "instruction"
-_INPUT_COL = "input"
-_OUTPUT_COL = "output"
-_SOURCE_COL = "_source"
-
-_CANONICAL_COLUMNS = [_INSTRUCTION_COL, _INPUT_COL, _OUTPUT_COL, _SOURCE_COL]
 
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 
 
-def _configure_logging(verbose: bool) -> logging.Logger:
-    """Delegates to the shared pipeline logging utility."""
+def _configure_logging(log_dir: Path, verbose: bool) -> logging.Logger:
     from src.utils.logging import configure_pipeline_logging  # noqa: PLC0415
     return configure_pipeline_logging(
-        log_dir=_LOG_DIR,
+        log_dir=log_dir,
         log_prefix="build",
         logger_name="build_dataset",
         verbose=verbose,
@@ -107,160 +104,104 @@ def _configure_logging(verbose: bool) -> logging.Logger:
 
 
 # ---------------------------------------------------------------------------
-# Schema adapters
-#
-# Each adapter accepts a raw dict (one row) and must return a dict with keys:
-#   instruction (str), input (str), output (str)
-# Return None to drop the row entirely.
+# Mixture config loader
 # ---------------------------------------------------------------------------
 
-Adapter = Callable[[dict[str, Any]], Optional[dict[str, str]]]
+
+def _load_mixture_cfg(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    with path.open(encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
 
 
-def _coerce(value: Any) -> str:
-    """Return a stripped string, or empty string for None / non-str values."""
+def _parse_ratios(mixture_cfg: dict) -> dict[str, float]:
+    """Extract and normalise dataset ratios from mixture.yaml."""
+    raw = mixture_cfg.get("mixture", {}).get("ratios", {})
+    if not raw:
+        return {}
+    total = sum(raw.values())
+    if total <= 0:
+        return {}
+    return {k: v / total for k, v in raw.items()}
+
+
+# ---------------------------------------------------------------------------
+# Alpaca adapter (reads CanonicalExample columns from parquet)
+# ---------------------------------------------------------------------------
+
+def _coerce(value) -> str:
     if value is None:
         return ""
     return str(value).strip()
 
 
-# ── Adapter: opc_sft_stage1 ─────────────────────────────────────────────────
-# Schema: { "instruction": str, "output": str, ... }
-def _adapt_opc_sft_stage1(row: dict) -> Optional[dict[str, str]]:
-    instr = _coerce(row.get("instruction") or row.get("prompt") or row.get("text"))
-    out = _coerce(row.get("output") or row.get("response"))
-    if not instr or not out:
-        return None
-    return {"instruction": instr, "input": "", "output": out}
+def _row_to_alpaca(row: dict) -> Optional[dict[str, str]]:
+    """Convert a CanonicalExample row dict to an Alpaca training example.
 
-
-# ── Adapter: the_stack_v2 ────────────────────────────────────────────────────
-# Schema: { "content": str, "lang": str, ... }
-def _adapt_the_stack_v2(row: dict) -> Optional[dict[str, str]]:
-    content = _coerce(row.get("content") or row.get("text") or row.get("code"))
-    if not content:
-        return None
-    lang = _coerce(row.get("lang") or row.get("language") or "code")
-    instr = f"Complete the following {lang} code:"
-    return {"instruction": instr, "input": "", "output": content}
-
-
-# ── Adapter: code_search_net ─────────────────────────────────────────────────
-# Schema: { "func_code_string": str, "func_documentation_string": str, ... }
-def _adapt_code_search_net(row: dict) -> Optional[dict[str, str]]:
-    code = _coerce(
-        row.get("func_code_string")
-        or row.get("whole_func_string")
-        or row.get("code")
-    )
-    doc = _coerce(
-        row.get("func_documentation_string")
-        or row.get("docstring")
-        or row.get("summary")
-    )
-    if not code:
-        return None
-    if doc:
-        instr = f"Write a function that does the following:\n{doc}"
-    else:
-        lang = _coerce(row.get("language") or "code")
-        instr = f"Complete the following {lang} function:"
-    return {"instruction": instr, "input": "", "output": code}
-
-
-# ── Adapter: swe_bench_verified ───────────────────────────────────────────────
-# Schema: { "problem_statement": str, "patch": str, ... }
-def _adapt_swe_bench_verified(row: dict) -> Optional[dict[str, str]]:
-    problem = _coerce(row.get("problem_statement") or row.get("text"))
-    patch = _coerce(row.get("patch") or row.get("solution") or row.get("output"))
-    if not problem or not patch:
-        return None
-    instr = f"Fix the following software issue:\n{problem}"
-    return {"instruction": instr, "input": "", "output": patch}
-
-
-# ── Generic heuristic adapter ─────────────────────────────────────────────────
-# Applied to any dataset that does not match a known name.
-_INSTRUCTION_FIELDS = ("instruction", "prompt", "question", "problem_statement",
-                       "text", "body", "hint")
-_OUTPUT_FIELDS = ("output", "response", "answer", "solution", "code",
-                  "content", "patch", "func_code_string")
-_INPUT_FIELDS = ("input", "context", "auxiliary")
-
-
-def _adapt_generic(row: dict) -> Optional[dict[str, str]]:
-    """Best-effort heuristic adapter for unknown dataset schemas."""
-    instr = ""
-    for f in _INSTRUCTION_FIELDS:
-        val = _coerce(row.get(f))
-        if val:
-            instr = val
-            break
-
-    out = ""
-    for f in _OUTPUT_FIELDS:
-        val = _coerce(row.get(f))
-        if val:
-            out = val
-            break
-
-    inp = ""
-    for f in _INPUT_FIELDS:
-        val = _coerce(row.get(f))
-        if val:
-            inp = val
-            break
-
-    if not instr or not out:
-        return None
-    return {"instruction": instr, "input": inp, "output": out}
-
-
-# Registry: dataset_name -> adapter function
-_ADAPTER_REGISTRY: dict[str, Adapter] = {
-    "opc_sft_stage1":    _adapt_opc_sft_stage1,
-    "the_stack_v2":      _adapt_the_stack_v2,
-    "code_search_net":   _adapt_code_search_net,
-    "swe_bench_verified": _adapt_swe_bench_verified,
-}
-
-
-def get_adapter(dataset_name: str, adapter_hint: str | None = None) -> Adapter:
-    """Return the adapter for *dataset_name*.
-
-    Lookup order:
-    1. *adapter_hint* — the ``adapter`` field from ``configs/datasets.yaml``
-       (the registry is the single source of truth when populated).
-    2. *dataset_name* in ``_ADAPTER_REGISTRY`` — legacy fallback for names
-       not yet in the YAML.
-    3. ``_adapt_generic`` — heuristic fallback for unknown schemas.
+    Returns ``None`` for rows that should be dropped (empty instruction or output).
+    The parquet columns (instruction, input, output, dataset, quality_score …)
+    map directly to LLaMA Factory's expected Alpaca format.
     """
-    key = adapter_hint or dataset_name
-    return _ADAPTER_REGISTRY.get(key, _adapt_generic)
+    instruction = _coerce(row.get("instruction"))
+    output = _coerce(row.get("output"))
+    if not instruction or not output:
+        return None
+    return {
+        "instruction": instruction,
+        "input":       _coerce(row.get("input", "")),
+        "output":      output,
+        "_source":     _coerce(row.get("dataset", "unknown")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Parquet shard reader
+# ---------------------------------------------------------------------------
+
+
+def _iter_parquet_shards(
+    dataset_dir: Path,
+    glob: str = "train-*.parquet",
+    batch_size: int = 1000,
+) -> Iterator[dict]:
+    """Yield raw row dicts from all matching parquet shards under *dataset_dir*."""
+    shards = sorted(dataset_dir.glob(glob))
+    if not shards:
+        return
+    for shard_path in shards:
+        try:
+            pf = pq.ParquetFile(shard_path)
+            for batch in pf.iter_batches(batch_size=batch_size):
+                batch_dict = batch.to_pydict()
+                n = len(next(iter(batch_dict.values()), []))
+                for i in range(n):
+                    yield {col: vals[i] for col, vals in batch_dict.items()}
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger("build_dataset").warning(
+                "Skipping corrupted shard %s: %s", shard_path, exc
+            )
 
 
 # ---------------------------------------------------------------------------
 # Statistics
 # ---------------------------------------------------------------------------
 
-_TOKEN_BUCKETS = [0, 64, 128, 256, 512, 1024, 2048, 4096, 8192]
 
-
-def _tok_bucket(n_tokens: int) -> str:
-    """Return the histogram bucket label for *n_tokens*."""
+def _tok_bucket(n: int) -> str:
     for i in range(len(_TOKEN_BUCKETS) - 1):
-        if n_tokens <= _TOKEN_BUCKETS[i + 1]:
+        if n <= _TOKEN_BUCKETS[i + 1]:
             return f"{_TOKEN_BUCKETS[i]}-{_TOKEN_BUCKETS[i + 1]}"
     return f"{_TOKEN_BUCKETS[-1]}+"
 
 
 @dataclass
 class SourceStats:
-    """Per-source conversion statistics."""
     name: str
     raw_rows: int = 0
     converted: int = 0
     dropped: int = 0
+    sampled: int = 0
 
     @property
     def drop_pct(self) -> float:
@@ -269,16 +210,14 @@ class SourceStats:
 
 @dataclass
 class BuildStats:
-    """Global statistics for the full build run."""
     generated_at: str = field(default_factory=lambda: time.strftime("%Y-%m-%dT%H:%M:%S"))
     seed: int = 42
-    val_ratio: float = 0.05
+    dataset_name: str = _DEFAULT_DATASET_NAME
+    output_file: str = ""
     sources: list[SourceStats] = field(default_factory=list)
-    total_merged: int = 0
-    train_rows: int = 0
-    val_rows: int = 0
-    token_histogram: dict[str, int] = field(default_factory=dict)
+    total_written: int = 0
     elapsed_s: float = 0.0
+    token_histogram: dict[str, int] = field(default_factory=dict)
 
     @property
     def total_source_rows(self) -> int:
@@ -292,12 +231,11 @@ class BuildStats:
         return {
             "generated_at": self.generated_at,
             "seed": self.seed,
-            "val_ratio": self.val_ratio,
+            "dataset_name": self.dataset_name,
+            "output_file": self.output_file,
             "total_source_rows": self.total_source_rows,
-            "total_merged": self.total_merged,
+            "total_written": self.total_written,
             "total_dropped": self.total_dropped,
-            "train_rows": self.train_rows,
-            "val_rows": self.val_rows,
             "elapsed_s": round(self.elapsed_s, 2),
             "sources": [
                 {
@@ -305,33 +243,13 @@ class BuildStats:
                     "raw_rows": s.raw_rows,
                     "converted": s.converted,
                     "dropped": s.dropped,
+                    "sampled": s.sampled,
                     "drop_pct": s.drop_pct,
                 }
                 for s in self.sources
             ],
             "token_histogram": self.token_histogram,
         }
-
-
-# ---------------------------------------------------------------------------
-# Token histogram builder
-# ---------------------------------------------------------------------------
-
-
-def _build_token_histogram(dataset: hf_datasets.Dataset) -> dict[str, int]:
-    """Count rows by estimated token bucket (instruction + output combined)."""
-    counts: dict[str, int] = {b: 0 for b in [
-        f"{_TOKEN_BUCKETS[i]}-{_TOKEN_BUCKETS[i+1]}"
-        for i in range(len(_TOKEN_BUCKETS) - 1)
-    ] + [f"{_TOKEN_BUCKETS[-1]}+"]}
-
-    for row in tqdm(dataset, desc="  Token histogram", leave=False, unit="row"):
-        text = (row.get(_INSTRUCTION_COL) or "") + (row.get(_OUTPUT_COL) or "")
-        n_tok = math.ceil(len(text) / _CHARS_PER_TOKEN)
-        bucket = _tok_bucket(n_tok)
-        counts[bucket] = counts.get(bucket, 0) + 1
-
-    return {k: v for k, v in counts.items() if v > 0}
 
 
 # ---------------------------------------------------------------------------
@@ -342,110 +260,82 @@ def _build_token_histogram(dataset: hf_datasets.Dataset) -> dict[str, int]:
 def _build_markdown(stats: BuildStats) -> str:
     lines: list[str] = []
     a = lines.append
-
-    a("# Training Dataset Build Report")
+    a(f"# Training Dataset Build Report — `{stats.dataset_name}`")
     a("")
     a(f"- **Generated:** {stats.generated_at}")
     a(f"- **Random seed:** {stats.seed}")
-    a(f"- **Validation ratio:** {stats.val_ratio:.1%}")
+    a(f"- **Output file:** `{stats.output_file}`")
     a(f"- **Elapsed:** {stats.elapsed_s:.1f}s")
     a("")
-
-    # Overview
     a("## Overview")
     a("")
     a("| Metric | Count |")
     a("|--------|-------|")
     a(f"| Total source rows | {stats.total_source_rows:,} |")
-    a(f"| Total merged (after conversion) | {stats.total_merged:,} |")
-    a(f"| Total dropped (adapter mismatch) | {stats.total_dropped:,} |")
-    a(f"| Train rows | {stats.train_rows:,} |")
-    a(f"| Validation rows | {stats.val_rows:,} |")
+    a(f"| Total written | {stats.total_written:,} |")
+    a(f"| Total dropped (adapter/quality) | {stats.total_dropped:,} |")
     a("")
-
-    # Per-source
     a("## Per-Source Breakdown")
     a("")
-    a("| Source | Raw Rows | Converted | Dropped | Drop % |")
-    a("|--------|----------|-----------|---------|--------|")
+    a("| Source | Raw | Converted | Dropped | Sampled | Drop% |")
+    a("|--------|-----|-----------|---------|---------|-------|")
     for s in stats.sources:
-        a(f"| `{s.name}` | {s.raw_rows:,} | {s.converted:,} | {s.dropped:,} | {s.drop_pct:.1f}% |")
+        a(f"| `{s.name}` | {s.raw_rows:,} | {s.converted:,} | {s.dropped:,} | {s.sampled:,} | {s.drop_pct:.1f}% |")
     a("")
-
-    # Token histogram
     if stats.token_histogram:
-        a("## Token Length Distribution (train split)")
+        a("## Token Length Distribution")
         a("")
         a("| Token bucket | Row count |")
         a("|-------------|-----------|")
         for bucket, cnt in sorted(stats.token_histogram.items()):
             a(f"| {bucket} | {cnt:,} |")
         a("")
-
     return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
-# Core logic
+# Core build logic
 # ---------------------------------------------------------------------------
 
 
-def _load_cleaned(cleaned_dir: Path, logger: logging.Logger) -> hf_datasets.Dataset:
-    """Load a cleaned Arrow dataset, flattening DatasetDict to a single split."""
-    raw = hf_datasets.load_from_disk(str(cleaned_dir))
-    if isinstance(raw, hf_datasets.DatasetDict):
-        split = list(raw.keys())[0]
-        logger.debug("  DatasetDict — using split %r", split)
-        return raw[split]  # type: ignore[return-value]
-    return raw  # type: ignore[return-value]
+def _build_token_histogram(examples: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for ex in examples:
+        text = (ex.get("instruction") or "") + (ex.get("output") or "")
+        bucket = _tok_bucket(math.ceil(len(text) / _CHARS_PER_TOKEN))
+        counts[bucket] = counts.get(bucket, 0) + 1
+    return {k: v for k, v in counts.items() if v > 0}
 
 
-def _convert_dataset(
-    dataset: hf_datasets.Dataset,
+def _process_source(
+    dataset_dir: Path,
     dataset_name: str,
+    max_per_source: Optional[int],
     logger: logging.Logger,
-    adapter_hint: str | None = None,
-) -> tuple[hf_datasets.Dataset, SourceStats]:
-    """Apply the per-dataset adapter, return canonical Dataset + SourceStats."""
-    adapter = get_adapter(dataset_name, adapter_hint)
-    adapter_name = adapter_hint or (dataset_name if dataset_name in _ADAPTER_REGISTRY else "generic")
-    logger.info(
-        "  Adapter: %r (%d rows)",
-        adapter_name,
-        len(dataset),
-    )
+) -> tuple[list[dict], SourceStats]:
+    """Read all train parquet shards for one dataset and convert to Alpaca."""
+    stats = SourceStats(name=dataset_name)
+    examples: list[dict] = []
 
-    stats = SourceStats(name=dataset_name, raw_rows=len(dataset))
-
-    canonical_rows: list[dict[str, str]] = []
-    for row in tqdm(dataset, desc=f"  Converting [{dataset_name}]", leave=False, unit="row"):
-        result = adapter(row)
-        # Validate: adapter must return non-None with non-empty instruction AND output
-        if (
-            result is None
-            or not result.get(_INSTRUCTION_COL)
-            or not result.get(_OUTPUT_COL)
-        ):
+    for raw_row in _iter_parquet_shards(dataset_dir):
+        stats.raw_rows += 1
+        alpaca = _row_to_alpaca(raw_row)
+        if alpaca is None:
             stats.dropped += 1
         else:
-            result[_SOURCE_COL] = dataset_name
-            canonical_rows.append(result)
+            examples.append(alpaca)
             stats.converted += 1
 
-    if not canonical_rows:
-        logger.warning("  No rows survived conversion for %s!", dataset_name)
-        # Return an empty dataset with the correct schema
-        empty = hf_datasets.Dataset.from_dict(
-            {col: [] for col in _CANONICAL_COLUMNS}
-        )
-        return empty, stats
+    # Apply per-source cap (from mixture quota or --max-samples)
+    if max_per_source is not None and len(examples) > max_per_source:
+        examples = examples[:max_per_source]
 
-    converted = hf_datasets.Dataset.from_list(canonical_rows)
+    stats.sampled = len(examples)
     logger.info(
-        "  Converted %d / %d rows (dropped %d, %.1f%%)",
-        stats.converted, stats.raw_rows, stats.dropped, stats.drop_pct,
+        "  %s: raw=%d converted=%d dropped=%d sampled=%d",
+        dataset_name, stats.raw_rows, stats.converted, stats.dropped, stats.sampled,
     )
-    return converted, stats
+    return examples, stats
 
 
 # ---------------------------------------------------------------------------
@@ -457,39 +347,72 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="build_training_dataset.py",
         description=(
-            "Merge cleaned datasets into a single canonical Alpaca-format "
-            "training corpus, shuffle, and split into train/validation."
+            "Merge processed parquet datasets into a single Alpaca JSONL file "
+            "for LLaMA Factory SFT training."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  # Build from all cleaned datasets with defaults
+  # Build from all processed datasets
   python scripts/build_training_dataset.py
 
-  # 10% validation split, fixed seed
-  python scripts/build_training_dataset.py --val-ratio 0.10 --seed 123
-
-  # Process only one source
+  # Build only one source
   python scripts/build_training_dataset.py --name opc_sft_stage1
 
-  # Dry run (merge + stats, no disk writes)
+  # Cap total examples
+  python scripts/build_training_dataset.py --max-samples 500000
+
+  # Dry run (no disk writes)
   python scripts/build_training_dataset.py --dry-run
+
+  # Custom output name
+  python scripts/build_training_dataset.py --dataset-name my_sft_v2
 """,
     )
-    parser.add_argument("--cleaned-dir", type=Path, default=None, metavar="PATH",
-                        help="Root of cleaned datasets (default: datasets/cleaned).")
-    parser.add_argument("--out-dir", type=Path, default=None, metavar="PATH",
-                        help="Output directory (default: datasets/final).")
-    parser.add_argument("--name", type=str, default=None, metavar="NAME",
-                        help="Process only the cleaned dataset with this name.")
-    parser.add_argument("--val-ratio", type=float, default=0.05, metavar="RATIO",
-                        help="Fraction of rows for the validation split (default: 0.05).")
-    parser.add_argument("--seed", type=int, default=42, metavar="SEED",
-                        help="Random seed for shuffling (default: 42).")
-    parser.add_argument("--dry-run", action="store_true", default=False,
-                        help="Apply pipeline but do not write files to disk.")
-    parser.add_argument("--verbose", action="store_true", default=False,
-                        help="Enable DEBUG-level console output.")
+    parser.add_argument(
+        "--processed-dir", type=Path, default=None, metavar="PATH",
+        help="Root of processed datasets (default: datasets/processed).",
+    )
+    parser.add_argument(
+        "--out-dir", type=Path, default=None, metavar="PATH",
+        help="Output directory (default: datasets/instruction).",
+    )
+    parser.add_argument(
+        "--mixture", type=Path, default=None, metavar="PATH",
+        help="Mixture config YAML (default: configs/mixture.yaml).",
+    )
+    parser.add_argument(
+        "--dataset-name", type=str, default=_DEFAULT_DATASET_NAME, metavar="NAME",
+        help=f"LLaMA Factory dataset name (default: {_DEFAULT_DATASET_NAME}).",
+    )
+    parser.add_argument(
+        "--name", type=str, default=None, metavar="NAME",
+        help="Process only the processed dataset with this source name.",
+    )
+    parser.add_argument(
+        "--max-samples", type=int, default=None, metavar="N",
+        help="Maximum total examples to write (applied after mixture sampling).",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, metavar="SEED",
+        help="Random seed for shuffling (default: 42).",
+    )
+    parser.add_argument(
+        "--no-shuffle", action="store_true", default=False,
+        help="Skip the global shuffle step.",
+    )
+    parser.add_argument(
+        "--no-register", action="store_true", default=False,
+        help="Skip writing data/dataset_info.json.",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true", default=False,
+        help="Run all logic but do not write any files.",
+    )
+    parser.add_argument(
+        "--verbose", action="store_true", default=False,
+        help="Enable DEBUG-level console output.",
+    )
     return parser.parse_args(argv)
 
 
@@ -500,161 +423,158 @@ Examples:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
-    logger = _configure_logging(verbose=args.verbose)
+    logger = _configure_logging(_LOG_DIR, verbose=args.verbose)
 
-    cleaned_root: Path = args.cleaned_dir or _CLEANED_BASE
-    out_root: Path = args.out_dir or _FINAL_BASE
-    val_ratio: float = max(0.0, min(args.val_ratio, 0.5))  # clamp [0, 0.5]
+    processed_root: Path = args.processed_dir or _PROCESSED_BASE
+    out_dir: Path = args.out_dir or _INSTRUCTION_BASE
+    mixture_path: Path = args.mixture or _MIXTURE_CFG
+    dataset_name: str = args.dataset_name
     seed: int = args.seed
 
-    # Validate inputs
-    if not cleaned_root.exists():
+    # ── Validate processed root ───────────────────────────────────────────────
+    if not processed_root.exists():
         logger.error(
-            "Cleaned dataset directory not found: %s\n"
-            "Run 'python scripts/clean_dataset.py' first.",
-            cleaned_root,
+            "Processed dataset directory not found: %s\n"
+            "Run 'python scripts/run_pipeline.py' first.",
+            processed_root,
         )
         return 1
 
-    # Discover cleaned dataset sub-directories (skip hidden + stats files)
-    candidates = sorted(
-        d for d in cleaned_root.iterdir()
-        if d.is_dir() and not d.name.startswith(".")
+    # ── Discover source directories ───────────────────────────────────────────
+    candidate_dirs = sorted(
+        d for d in processed_root.iterdir()
+        if d.is_dir() and not d.name.startswith("_") and not d.name.startswith(".")
     )
-    if not candidates:
-        logger.warning("No sub-directories found under %s.", cleaned_root)
-        return 0
+    if not candidate_dirs:
+        logger.error("No processed dataset directories found under %s.", processed_root)
+        return 1
 
     if args.name:
-        candidates = [d for d in candidates if d.name == args.name]
-        if not candidates:
+        candidate_dirs = [d for d in candidate_dirs if d.name == args.name]
+        if not candidate_dirs:
             logger.error(
                 "Dataset %r not found under %s. Available: %s",
-                args.name, cleaned_root,
-                [d.name for d in sorted(cleaned_root.iterdir()) if d.is_dir()],
+                args.name, processed_root,
+                [d.name for d in sorted(processed_root.iterdir()) if d.is_dir()],
             )
             return 1
 
-    # ── 0. Load adapter hints from registry (non-fatal if registry unavailable) ─
-    _adapter_hints: dict[str, str | None] = {}
-    try:
-        from src.data.registry import load_registry  # noqa: PLC0415
-        registry_entries = load_registry()
-        _adapter_hints = {e.name: e.adapter for e in registry_entries}
-        logger.debug("Loaded adapter hints for %d registry entries.", len(_adapter_hints))
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Could not load adapter hints from registry: %s — using heuristic adapters.", exc
-        )
+    # ── Load mixture ratios ────────────────────────────────────────────────────
+    mixture_cfg = _load_mixture_cfg(mixture_path)
+    ratios = _parse_ratios(mixture_cfg)
+    max_total = mixture_cfg.get("mixture", {}).get("total_examples") or args.max_samples
+    logger.info("Mixture ratios: %s", ratios or "(uniform — no mixture.yaml)")
+    if max_total:
+        logger.info("Max total examples: %d", max_total)
 
     t0 = time.monotonic()
     logger.info(
-        "Building training corpus from %d cleaned dataset(s): %s%s",
-        len(candidates),
-        [d.name for d in candidates],
+        "Building %r from %d source(s): %s%s",
+        dataset_name, len(candidate_dirs),
+        [d.name for d in candidate_dirs],
         " [DRY-RUN]" if args.dry_run else "",
     )
-    logger.info("val_ratio=%.3f  seed=%d", val_ratio, seed)
 
-    # ── 1. Load, convert, and merge ───────────────────────────────────────────
-    all_parts: list[hf_datasets.Dataset] = []
-    source_stats: list[SourceStats] = []
+    # ── Process each source ───────────────────────────────────────────────────
+    all_examples: list[dict] = []
+    all_stats: list[SourceStats] = []
 
-    for dataset_dir in tqdm(candidates, desc="Loading & converting", unit="ds"):
-        name = dataset_dir.name
-        logger.info("[LOAD] %s", name)
+    for ds_dir in tqdm(candidate_dirs, desc="Sources", unit="ds", file=sys.stdout):
+        name = ds_dir.name
 
-        try:
-            ds = _load_cleaned(dataset_dir, logger)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("[FAIL] Could not load %s: %s", name, exc, exc_info=True)
-            # Record as fully dropped
-            source_stats.append(SourceStats(name=name, raw_rows=0, dropped=0))
-            continue
+        # Compute per-source cap from mixture ratios + max_total
+        max_per_source: Optional[int] = None
+        if ratios and max_total:
+            ratio = ratios.get(name, 1.0 / len(candidate_dirs))
+            max_per_source = max(1, round(max_total * ratio))
+        elif max_total:
+            max_per_source = max(1, round(max_total / len(candidate_dirs)))
 
-        adapter_hint = _adapter_hints.get(name)
-        converted, ss = _convert_dataset(ds, name, logger, adapter_hint=adapter_hint)
-        source_stats.append(ss)
+        logger.info("[LOAD] %s (max_per_source=%s)", name, max_per_source)
+        examples, stats = _process_source(
+            ds_dir, name, max_per_source, logger
+        )
+        all_examples.extend(examples)
+        all_stats.append(stats)
 
-        if len(converted) > 0:
-            all_parts.append(converted)
-
-
-    if not all_parts:
-        logger.error("No rows were converted from any dataset. Aborting.")
+    if not all_examples:
+        logger.error("No examples were produced from any dataset. Aborting.")
         return 1
 
-    # ── 2. Concatenate ────────────────────────────────────────────────────────
-    logger.info("Concatenating %d source(s) ...", len(all_parts))
-    merged = hf_datasets.concatenate_datasets(all_parts)
-    logger.info("Total merged rows: %d", len(merged))
+    logger.info("Total examples before shuffle: %d", len(all_examples))
 
-    # ── 3. Shuffle ────────────────────────────────────────────────────────────
-    logger.info("Shuffling with seed=%d ...", seed)
-    merged = merged.shuffle(seed=seed)
+    # ── Apply global max_samples cap ─────────────────────────────────────────
+    if max_total and len(all_examples) > max_total:
+        all_examples = all_examples[:max_total]
+        logger.info("Capped to %d examples.", max_total)
 
-    # ── 4. Train/validation split ─────────────────────────────────────────────
-    n_total = len(merged)
-    n_val = round(n_total * val_ratio) if val_ratio > 0 else 0
-    n_train = n_total - n_val
+    # ── Shuffle ───────────────────────────────────────────────────────────────
+    if not args.no_shuffle:
+        logger.info("Shuffling %d examples (seed=%d) ...", len(all_examples), seed)
+        rng = random.Random(seed)
+        rng.shuffle(all_examples)
 
-    logger.info(
-        "Splitting: train=%d (%.1f%%)  val=%d (%.1f%%)",
-        n_train, 100.0 * n_train / n_total,
-        n_val,   100.0 * n_val   / n_total,
-    )
-
-    train_ds = merged.select(range(n_train))
-    val_ds = merged.select(range(n_train, n_total))
-
-    # ── 5. Build statistics ───────────────────────────────────────────────────
-    logger.info("Building token histogram ...")
-    token_hist = _build_token_histogram(train_ds)
-
+    # ── Build statistics ──────────────────────────────────────────────────────
+    token_hist = _build_token_histogram(all_examples)
+    output_file = out_dir / f"{dataset_name}.jsonl"
     build_stats = BuildStats(
         seed=seed,
-        val_ratio=val_ratio,
-        sources=source_stats,
-        total_merged=n_total,
-        train_rows=n_train,
-        val_rows=n_val,
-        token_histogram=token_hist,
+        dataset_name=dataset_name,
+        output_file=str(output_file),
+        sources=all_stats,
+        total_written=len(all_examples),
         elapsed_s=time.monotonic() - t0,
+        token_histogram=token_hist,
     )
 
-    # ── 6. Save ───────────────────────────────────────────────────────────────
+    # ── Write outputs ─────────────────────────────────────────────────────────
     if args.dry_run:
         logger.info(
-            "[DRY-RUN] Would save train=%d rows and val=%d rows to %s",
-            n_train, n_val, out_root,
+            "[DRY-RUN] Would write %d examples to %s",
+            len(all_examples), output_file,
         )
-    else:
-        out_root.mkdir(parents=True, exist_ok=True)
-        train_path = out_root / "train"
-        val_path = out_root / "validation"
+        _print_summary(build_stats, logger)
+        return 0
 
-        logger.info("Saving train split (%d rows) -> %s ...", n_train, train_path)
-        train_ds.save_to_disk(str(train_path))
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        logger.info("Saving validation split (%d rows) -> %s ...", n_val, val_path)
-        val_ds.save_to_disk(str(val_path))
+    # Write JSONL
+    logger.info("Writing %d examples → %s ...", len(all_examples), output_file)
+    tmp_out = output_file.with_suffix(".jsonl.tmp")
+    with tmp_out.open("w", encoding="utf-8") as fh:
+        for ex in all_examples:
+            fh.write(json.dumps(ex, ensure_ascii=False) + "\n")
+    os.replace(tmp_out, output_file)
+    logger.info("JSONL written: %s  (%.1f MB)", output_file,
+                output_file.stat().st_size / 1024 / 1024)
 
-        # JSON stats
-        stats_path = out_root / "build_stats.json"
-        stats_path.write_text(
-            json.dumps(build_stats.as_dict(), indent=2),
-            encoding="utf-8",
+    # Write stats JSON
+    stats_path = out_dir / "build_stats.json"
+    stats_path.write_text(
+        json.dumps(build_stats.as_dict(), indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    logger.info("Stats  → %s", stats_path)
+
+    # Write Markdown report
+    md_path = out_dir / "build_report.md"
+    md_path.write_text(_build_markdown(build_stats), encoding="utf-8")
+    logger.info("Report → %s", md_path)
+
+    # Register in data/dataset_info.json
+    if not args.no_register:
+        info_path = register_dataset(
+            dataset_name=dataset_name,
+            file_path=output_file,
         )
+        logger.info("Registered in %s", info_path)
 
-        # Markdown report
-        md_path = out_root / "build_report.md"
-        md_path.write_text(_build_markdown(build_stats), encoding="utf-8")
+    _print_summary(build_stats, logger)
+    return 0
 
-        logger.info("Stats  -> %s", stats_path)
-        logger.info("Report -> %s", md_path)
 
-    # ── 7. Summary table ──────────────────────────────────────────────────────
-    _W = 70
+def _print_summary(stats: BuildStats, logger: logging.Logger) -> None:
+    _W = 72
     sep = "  " + "-" * _W
 
     def _row(a: str, b: str, c: str, d: str, e: str) -> str:
@@ -663,35 +583,30 @@ def main(argv: list[str] | None = None) -> int:
     lines = [
         "",
         "  " + "=" * _W,
-        "  BUILD SUMMARY",
+        f"  BUILD SUMMARY — {stats.dataset_name}",
         "  " + "=" * _W,
-        _row("Source", "Raw", "Converted", "Dropped", "Drop%"),
+        _row("Source", "Raw", "Converted", "Sampled", "Drop%"),
         sep,
     ]
-    for s in source_stats:
+    for s in stats.sources:
         lines.append(
             _row(s.name[:22], f"{s.raw_rows:,}", f"{s.converted:,}",
-                 f"{s.dropped:,}", f"{s.drop_pct:.1f}%")
+                 f"{s.sampled:,}", f"{s.drop_pct:.1f}%")
         )
     lines += [
         sep,
-        _row("TOTAL", f"{build_stats.total_source_rows:,}",
-             f"{build_stats.total_merged:,}",
-             f"{build_stats.total_dropped:,}", ""),
-        sep,
-        f"  Train : {n_train:>10,} rows",
-        f"  Val   : {n_val:>10,} rows",
+        f"  Total written : {stats.total_written:>10,} examples",
+        f"  Output file   : {stats.output_file}",
         "  " + "=" * _W,
         "",
     ]
-    if build_stats.token_histogram:
-        lines.insert(-1, "  Token histogram (train):")
-        for bucket, cnt in sorted(token_hist.items()):
+    if stats.token_histogram:
+        lines.insert(-1, "  Token histogram:")
+        for bucket, cnt in sorted(stats.token_histogram.items()):
             lines.insert(-1, f"    {bucket:<16} {cnt:>8,} rows")
         lines.insert(-1, "")
 
     logger.info("\n".join(lines))
-    return 0
 
 
 if __name__ == "__main__":

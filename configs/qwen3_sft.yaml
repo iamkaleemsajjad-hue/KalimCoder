@@ -1,7 +1,7 @@
 ### QLoRA SFT config for Qwen3-8B using LLaMA Factory
-### Run with: llamafactory-cli train configs/qwen3_sft.yaml
+### Run with: python scripts/train.py --config configs/qwen3_sft.yaml
 
-model_name_or_path: ../checkpoints/qwen3-8b-base
+model_name_or_path: checkpoints/qwen3-8b-base
 trust_remote_code: true
 
 ### Method
@@ -10,7 +10,8 @@ do_train: true
 finetuning_type: lora
 
 ### Dataset
-dataset: codealpaca  # register in data/dataset_info.json
+dataset_dir: data                  # location of data/dataset_info.json
+dataset: kalimcoder_sft            # registered by scripts/build_training_dataset.py
 template: qwen
 cutoff_len: 2048
 max_samples: 50000
@@ -18,7 +19,7 @@ overwrite_cache: true
 preprocessing_num_workers: 4
 
 ### Output
-output_dir: ../adapters/kaleemcoder-sft
+output_dir: adapters/kaleemcoder-sft
 logging_steps: 10
 save_steps: 500
 save_total_limit: 3
@@ -44,3 +45,4 @@ lora_target: all
 ### Quantization (QLoRA)
 quantization_bit: 4
 quantization_method: bitsandbytes
+

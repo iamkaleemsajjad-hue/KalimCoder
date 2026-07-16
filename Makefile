@@ -61,11 +61,11 @@ clean-data-force: ## Force re-clean all datasets even if cleaned output exists
 	$(PYTHON) scripts/clean_dataset.py --force
 
 .PHONY: build-dataset
-build-dataset: ## Merge cleaned datasets into final train/validation corpus
+build-dataset: ## Build Alpaca JSONL from processed parquet (auto-registers in data/dataset_info.json)
 	$(PYTHON) scripts/build_training_dataset.py
 
 .PHONY: build-dataset-dry-run
-build-dataset-dry-run: ## Dry-run build: merge + stats but do not write files
+build-dataset-dry-run: ## Dry-run: merge + stats but do not write files
 	$(PYTHON) scripts/build_training_dataset.py --dry-run
 
 .PHONY: data-pipeline
@@ -118,12 +118,16 @@ pipeline-status: ## Print checkpoint state for all datasets
 # ── Training ─────────────────────────────────────────────────────────────────
 
 .PHONY: train-sft
-train-sft: ## Run SFT training with QLoRA
-	$(PYTHON) scripts/train.py --config configs/training/sft_qlora.yaml
+train-sft: ## Run SFT training with QLoRA (preflight checks included)
+	$(PYTHON) scripts/train.py --config configs/qwen3_sft.yaml
+
+.PHONY: train-sft-dry-run
+train-sft-dry-run: ## Preflight-check only (no training launched)
+	$(PYTHON) scripts/train.py --config configs/qwen3_sft.yaml --dry-run
 
 .PHONY: train-dpo
-train-dpo: ## Run DPO alignment training
-	$(PYTHON) scripts/train.py --config configs/training/dpo.yaml
+train-dpo: ## Run DPO alignment training (preflight checks included)
+	$(PYTHON) scripts/train.py --config configs/dpo.yaml
 
 .PHONY: merge-lora
 merge-lora: ## Merge LoRA adapter into base model
