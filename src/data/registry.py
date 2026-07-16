@@ -65,6 +65,17 @@ class DatasetEntry:
     enabled:
         When ``False`` the entry is present in YAML but excluded from
         :func:`get_enabled_datasets`.
+    streaming:
+        Whether to use HF streaming mode for this dataset.  ``None`` means
+        "inherit from ``configs/pipeline.yaml``".
+    shard_size:
+        Per-dataset shard size override.  ``None`` means "use pipeline.yaml".
+    license:
+        SPDX licence identifier (e.g. ``"MIT"``, ``"Apache-2.0"``) or
+        ``"unknown"`` when not specified.
+    task_type:
+        Canonical task type for examples produced from this dataset.
+        Must be one of the values in :data:`~src.data.schema.TASK_TYPES`.
     """
 
     name: str
@@ -74,6 +85,10 @@ class DatasetEntry:
     enabled: bool
     config: str | None = field(default=None)
     adapter: str | None = field(default=None)
+    streaming: bool | None = field(default=None)
+    shard_size: int | None = field(default=None)
+    license: str = field(default="unknown")
+    task_type: str = field(default="instruction")
 
     # ------------------------------------------------------------------
     # Derived helpers
@@ -88,7 +103,11 @@ class DatasetEntry:
         cfg = f"/{self.config}" if self.config else ""
         status = "on" if self.enabled else "off"
         adapter = f" adapter={self.adapter!r}" if self.adapter else ""
-        return f"[{status}] {self.name} ({self.repo_id}{cfg}, split={self.split}{adapter})"
+        return (
+            f"[{status}] {self.name} ({self.repo_id}{cfg}, "
+            f"split={self.split}{adapter}, "
+            f"task_type={self.task_type!r}, license={self.license!r})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -102,8 +121,12 @@ _REQUIRED_FIELDS: dict[str, type] = {
     "enabled": bool,
 }
 _OPTIONAL_FIELDS: dict[str, type | tuple[type, ...]] = {
-    "config":  (str, type(None)),
-    "adapter": (str, type(None)),
+    "config":     (str, type(None)),
+    "adapter":    (str, type(None)),
+    "streaming":  (bool, type(None)),
+    "shard_size": (int, type(None)),
+    "license":    str,
+    "task_type":  str,
 }
 
 
@@ -233,11 +256,15 @@ def _load_yaml(config_path: Path) -> list[DatasetEntry]:
         entry = DatasetEntry(
             name=validated["name"],
             repo_id=validated["repo_id"],
-            config=validated.get("config"),       # optional
+            config=validated.get("config"),           # optional
             split=validated["split"],
             destination=validated["destination"],
-            adapter=validated.get("adapter"),     # optional
+            adapter=validated.get("adapter"),         # optional
             enabled=validated["enabled"],
+            streaming=validated.get("streaming"),     # optional
+            shard_size=validated.get("shard_size"),   # optional
+            license=validated.get("license", "unknown"),
+            task_type=validated.get("task_type", "instruction"),
         )
         entries.append(entry)
         logger.debug("Registered dataset: %s", entry)

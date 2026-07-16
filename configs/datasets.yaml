@@ -8,8 +8,12 @@
 #   config       (str | null)   – Dataset config / subset name (pass to load_dataset).
 #   split        (str)          – Dataset split to consume  (e.g. "train", "test").
 #   destination  (str)          – Relative path (from project root) where raw data lands.
-#   adapter      (str | null)   – Name of the build-time schema adapter. null = generic.
+#   adapter      (str | null)   – Name of the schema adapter. null = generic heuristic.
 #   enabled      (bool)         – Toggle without deleting the entry. false = skipped.
+#   streaming    (bool | null)  – Per-entry streaming override; null = use pipeline.yaml.
+#   shard_size   (int | null)   – Per-entry shard size override; null = use pipeline.yaml.
+#   license      (str)          – SPDX identifier (e.g. "MIT", "Apache-2.0", "unknown").
+#   task_type    (str)          – Canonical task type: instruction|completion|qa|debugging|documentation.
 #
 # None of these entries trigger a download; the registry is metadata-only.
 # Use the pipeline scripts (scripts/download_datasets.py) to materialise data.
@@ -25,10 +29,14 @@ datasets:
     destination: datasets/raw/opc_sft_stage1
     adapter:     opc_sft_stage1
     enabled:     true
+    streaming:   true
+    license:     "Apache-2.0"
+    task_type:   instruction
 
   # ── 2. The Stack v2 (bigcode) ───────────────────────────────────────────────
   # The Stack v2 is partitioned by programming language via the `config` key.
   # Set config to the language you want (e.g. "python") or null for the default.
+  # shard_size reduced to 10000 because individual files can be very large.
   - name:        the_stack_v2
     repo_id:     bigcode/the-stack-v2
     config:      null          # override per run (e.g. "python", "typescript")
@@ -36,6 +44,10 @@ datasets:
     destination: datasets/raw/the_stack_v2
     adapter:     the_stack_v2
     enabled:     true
+    streaming:   true
+    shard_size:  10000         # large files → small shards to stay under RAM limit
+    license:     "other"       # mixed: Apache-2.0, MIT, BSD, GPL; per-file license in metadata
+    task_type:   completion
 
   # ── 3. CodeSearchNet ────────────────────────────────────────────────────────
   # CodeSearchNet has per-language subsets: python, javascript, java, go, php, ruby.
@@ -47,6 +59,9 @@ datasets:
     destination: datasets/raw/code_search_net
     adapter:     code_search_net
     enabled:     true
+    streaming:   true
+    license:     "MIT"
+    task_type:   documentation
 
   # ── 4. SWE-bench Verified (Princeton-NLP) ───────────────────────────────────
   # Evaluation-grade dataset of real GitHub issues with verified patches.
@@ -58,3 +73,6 @@ datasets:
     destination: datasets/raw/swe_bench_verified
     adapter:     swe_bench_verified
     enabled:     true
+    streaming:   false         # small dataset; full download is fine
+    license:     "MIT"
+    task_type:   debugging

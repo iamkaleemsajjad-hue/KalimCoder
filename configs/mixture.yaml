@@ -1,0 +1,37 @@
+# configs/mixture.yaml
+#
+# Dataset mixture ratios for the KalimCoder training corpus.
+#
+# Ratios define the target proportion of each dataset in the final corpus.
+# They do NOT need to sum to 1.0 — the mixer normalises them automatically.
+#
+# strategy options:
+#   approximate  — best-effort; samples from each source proportionally
+#                  until the source is exhausted; does not oversample.
+#                  Actual ratios may differ slightly for small datasets.
+#   exact        — hard quota; each source stops once its allocation is hit.
+#                  Requires total_examples to be set.
+#   oversample   — repeats small datasets cyclically to meet the ratio.
+#                  Use with caution: may introduce repetition artefacts.
+#
+# total_examples: null means use all available examples (after ratio clipping).
+#
+# Used by: scripts/run_pipeline.py, scripts/build_training_dataset.py
+# ---------------------------------------------------------------------------
+
+mixture:
+  strategy: approximate
+  total_examples: null      # null = use all available examples
+
+  # Target ratios per dataset (normalised internally; do not need to sum to 1).
+  ratios:
+    the_stack_v2:       0.40    # Large code corpus — dominant source
+    opc_sft_stage1:     0.20    # High-quality instruction tuning data
+    swe_bench_verified: 0.15    # Real-world bug fixing / patch generation
+    code_search_net:    0.15    # Code + docstring pairs for documentation tasks
+
+    # Uncomment as new datasets are added to configs/datasets.yaml:
+    # mbpp:             0.05    # Programming puzzles
+    # humaneval:        0.05    # HumanEval competition problems
+    # documentation:    0.05    # README / docstring collections
+    # synthetic_cot:    0.05    # Chain-of-thought synthetic data

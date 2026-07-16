@@ -1,0 +1,112 @@
+# configs/pipeline.yaml
+#
+# Central configuration for the KalimCoder streaming data pipeline.
+# All values here are global defaults; individual datasets can override
+# shard_size and streaming via their entry in configs/datasets.yaml.
+#
+# Used by: scripts/run_pipeline.py
+# See also: configs/mixture.yaml  (dataset mixture ratios)
+# ---------------------------------------------------------------------------
+
+pipeline:
+  # Number of examples processed in a single in-memory shard.
+  # Lower values = less RAM and disk usage but more checkpoint overhead.
+  # Recommended: 10_000 (low RAM) – 100_000 (fast disk)
+  shard_size: 50000
+
+  # Use HuggingFace IterableDataset (streaming=True) where supported.
+  # Fallback to shard-at-a-time download when streaming is unavailable.
+  streaming: true
+
+  # Rows processed per .map() / generator batch during cleaning.
+  batch_size: 1000
+
+  # Number of parallel cleaning workers (0 = main thread, safe on Kaggle).
+  num_workers: 0
+
+  # Delete raw shard from HF cache after writing to parquet.
+  # Set false only when debugging to keep intermediate data.
+  delete_after_processing: true
+
+  # Number of retries per shard on transient network / IO failures.
+  retry_count: 3
+
+  # Seconds to wait between retries (exponential backoff base).
+  retry_backoff_s: 5
+
+
+dedup:
+  # Enable two-stage deduplication (BloomFilter + SHA-256 verification).
+  enabled: true
+
+  # Maximum number of unique items the Bloom filter tracks.
+  # 5M entries → ~8.6 MB RAM at fpr=0.001.
+  bloom_capacity: 5000000
+
+  # Target false-positive rate for the Bloom filter.
+  bloom_fpr: 0.001
+
+  # Maximum RAM (MB) for the SHA-256 exact-match verification set.
+  # Above this limit the deduplicator switches to Bloom-only mode with
+  # a logged warning. Increase for very large corpora if RAM allows.
+  max_confirmed_set_mb: 512
+
+
+quality:
+  # Enable quality scoring and filtering.
+  enabled: true
+
+  # Examples with quality_score < this are dropped before writing.
+  # Set to 0.0 to disable threshold filtering while still annotating scores.
+  min_quality_score: 0.30
+
+  # Token-count bounds (estimated as len(text) / 4).
+  min_tokens: 10
+  max_tokens: 8192
+
+  # Minimum fraction of alphanumeric characters in the output.
+  min_alpha_ratio: 0.25
+
+  # Maximum fraction of comment lines in the output.
+  # Files with > 80% comment lines are usually documentation, not code.
+  max_comment_ratio: 0.80
+
+  # Language detection confidence minimum (heuristic).
+  min_language_confidence: 0.5
+
+  # Regex patterns matched against the first 2000 chars.
+  # A match sets the autogen sub-score to 0.
+  autogen_patterns:
+    - "auto[-_]?generated"
+    - "\\bdo\\s+not\\s+edit\\b"
+    - "generated\\s+by\\b"
+    - "@generated"
+    - "this\\s+file\\s+is\\s+generated"
+    - "machine[-_]generated"
+
+
+output:
+  # Output format for processed datasets.
+  # parquet is recommended (columnar, compressed, fast random-access).
+  format: parquet
+
+  # Number of rows per output parquet file.
+  # 100_000 rows × ~512 bytes each ≈ 50 MB per file (before compression).
+  train_shard_rows: 100000
+
+  # Fraction of examples reserved for the validation split.
+  val_ratio: 0.05
+
+  # Random seed for validation sampling (deterministic across runs).
+  seed: 42
+
+  # Parquet compression codec: snappy (fast), zstd (smaller), none.
+  compress: snappy
+
+
+paths:
+  # Root directories for pipeline outputs (relative to project root).
+  processed:   datasets/processed
+  state:       datasets/state
+  token_cache: datasets/token_cache
+  logs:        logs/pipeline

@@ -69,10 +69,49 @@ build-dataset-dry-run: ## Dry-run build: merge + stats but do not write files
 	$(PYTHON) scripts/build_training_dataset.py --dry-run
 
 .PHONY: data-pipeline
-data-pipeline: ## Full pipeline: download -> clean -> build (end-to-end)
+data-pipeline: ## Legacy pipeline: download -> clean -> build (Arrow-based)
 	$(PYTHON) scripts/download_datasets.py
 	$(PYTHON) scripts/clean_dataset.py
 	$(PYTHON) scripts/build_training_dataset.py
+
+# ── Streaming Pipeline (new) ─────────────────────────────────────────────────
+
+.PHONY: stream-pipeline
+stream-pipeline: ## Run the full streaming pipeline (no intermediate files)
+	$(PYTHON) scripts/run_pipeline.py
+
+.PHONY: stream-pipeline-dry-run
+stream-pipeline-dry-run: ## Dry-run the streaming pipeline (inspect sources only)
+	$(PYTHON) scripts/run_pipeline.py --dry-run
+
+.PHONY: stream-pipeline-offline
+stream-pipeline-offline: ## Run streaming pipeline on local Arrow files (offline)
+	$(PYTHON) scripts/run_pipeline.py --offline
+
+.PHONY: stream-resume
+stream-resume: ## Resume streaming pipeline from last checkpoint
+	$(PYTHON) scripts/run_pipeline.py --resume
+
+.PHONY: stream-force
+stream-force: ## Restart streaming pipeline from scratch (ignores checkpoints)
+	$(PYTHON) scripts/run_pipeline.py --force
+
+.PHONY: tokenize
+tokenize: ## Tokenize processed parquet shards into Arrow token caches
+	$(PYTHON) scripts/tokenize_dataset.py \
+		--tokenizer Qwen/Qwen3-8B \
+		--max-length 8192
+
+.PHONY: pipeline-status
+pipeline-status: ## Print checkpoint state for all datasets
+	@$(PYTHON) -c "
+	import sys; sys.path.insert(0, '.')
+	from src.data.state import StateManager
+	from pathlib import Path
+	for s in StateManager().all_states():
+	    status = 'DONE' if s.finished else f'{len(s.completed_shard_indices)} shards'
+	    print(f'  {s.dataset_name:<25} {status:<12} written={s.total_written:>10,}')
+	"
 
 
 
