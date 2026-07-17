@@ -1,3 +1,4 @@
+
 ### model
 model_name_or_path: /kaggle/working/models/Qwen3-8B
 trust_remote_code: true
@@ -25,10 +26,8 @@ max_samples: 50000
 output_dir: /kaggle/working/KalimCoder/checkpoints/qwen3-lora
 
 logging_steps: 10
-
-save_strategy: steps
-save_steps: 50
-save_total_limit: 5
+save_steps: 200
+save_total_limit: 3
 
 ### training
 per_device_train_batch_size: 1
@@ -46,12 +45,10 @@ optim: paged_adamw_8bit
 
 ### distributed
 ddp_timeout: 180000000
+
+### hub
+push_to_hub: false
+
 ddp_find_unused_parameters: false
 
 upcast_layernorm: true
-
-### hub
-push_to_hub: true
-hub_model_id: kalim133173/KalimCoder
-hub_strategy: every_save
-hub_always_push: true

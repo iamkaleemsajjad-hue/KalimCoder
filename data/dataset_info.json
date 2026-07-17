@@ -1,0 +1,11 @@
+{
+  "kalimcoder_sft": {
+    "file_name": "datasets/instruction/kalimcoder_sft.jsonl",
+    "formatting": "alpaca",
+    "columns": {
+      "prompt": "instruction",
+      "query": "input",
+      "response": "output"
+    }
+  }
+}
